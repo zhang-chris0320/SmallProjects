@@ -237,3 +237,7 @@ if __name__ == '__main__':
                 'train_acc': train_acc,
             }, save_path)
             print(f"Best model saved to: {save_path}")
+    final_save_path = os.path.join(checkpoint_dir, "final_model.pth")
+    torch.save(model.state_dict(), final_save_path)
+    print(f"Training finished. Final model saved at {final_save_path} with best val_acc {best_val_acc:.4f}")
+
