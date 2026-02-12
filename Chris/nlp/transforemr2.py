@@ -329,6 +329,7 @@ def train_one_epoch(model, dataloader, loss_fn, optimizer, device):
 if __name__ == '__main__':
     process()
     
+    
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     train_dataset = TranslationDataset('data/processed/train.jsonl', max_len=50)
