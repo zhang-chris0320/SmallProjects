@@ -4,6 +4,17 @@ import torch.nn.functional as F
 import math
 import torch.nn as nn
 from torch import tensor
+from torch.utils.data import Dataset, DataLoader
+import numpy as np
+from tqdm import tqdm
+import os
+import json
+from pathlib import Path
+from collections import Counter
+import pandas as pd
+from tokenizer import EnglishTokenizer,ChineseTokenizer
+
+
 
 class TokenEmbedding(nn.Embedding):
     def __init__(self, vocb_size,embedding_dim):   #两个参数，一个词汇表大小，一个embedding维度
@@ -236,3 +247,134 @@ class Transformer(nn.Module):
         enc=self.encoder(src,src_mask)
         out=self.decoder(trg,src,trg_mask,src_mask)
         return out
+
+class ChineseTokenizer:
+    @staticmethod
+    def build_vocab(texts, save_path, vocab_size=10000):
+        words = []
+        for text in texts:
+            words.extend(jieba.cut(text))
+        counter = Counter(words).most_common(vocab_size - 4)
+        with open(save_path, 'w', encoding='utf-8') as f:
+            f.write('<pad>\n<sos>\n<eos>\n<unk>\n')
+            for w, _ in counter:
+                f.write(w + '\n')
+    
+    @staticmethod
+    def from_vocab(path):
+        t = ChineseTokenizer()
+        t.vocab = {}
+        with open(path, encoding='utf-8') as f:
+            for i, line in enumerate(f):
+                t.vocab[line.strip()] = i
+        return t
+    
+    def encode(self, text, add_sos_eos=False):
+        ids = [self.vocab.get(w, self.vocab['<unk>']) for w in jieba.cut(text)]
+        if add_sos_eos:
+            ids = [self.vocab['<sos>']] + ids + [self.vocab['<eos>']]
+        return ids
+
+class EnglishTokenizer:
+    @staticmethod
+    def build_vocab(texts, save_path, vocab_size=10000):
+        words = []
+        for text in texts:
+            words.extend(text.lower().split())
+        counter = Counter(words).most_common(vocab_size - 4)
+        with open(save_path, 'w', encoding='utf-8') as f:
+            f.write('<pad>\n<sos>\n<eos>\n<unk>\n')
+            for w, _ in counter:
+                f.write(w + '\n')
+    
+    @staticmethod
+    def from_vocab(path):
+        t = EnglishTokenizer()
+        t.vocab = {}
+        with open(path, encoding='utf-8') as f:
+            for i, line in enumerate(f):
+                t.vocab[line.strip()] = i
+        return t
+    
+    def encode(self, text, add_sos_eos=False):
+        ids = [self.vocab.get(w, self.vocab['<unk>']) for w in text.lower().split()]
+        if add_sos_eos:
+            ids = [self.vocab['<sos>']] + ids + [self.vocab['<eos>']]
+        return ids
+
+def process():
+    Path('models').mkdir(exist_ok=True)
+    Path('data/processed').mkdir(parents=True, exist_ok=True)
+    
+    train = pd.read_json('D:/translation2019zh/translation2019zh_train.json', lines=True)
+    test = pd.read_json('D:/translation2019zh/translation2019zh_valid.json', lines=True)
+    
+    train = train[['english', 'chinese']].rename(columns={'english':'en', 'chinese':'zh'})
+    test = test[['english', 'chinese']].rename(columns={'english':'en', 'chinese':'zh'})
+    
+    ChineseTokenizer.build_vocab(train['zh'].tolist(), 'models/zh_vocab.txt')
+    EnglishTokenizer.build_vocab(train['en'].tolist(), 'models/en_vocab.txt')
+    
+    zh_tk = ChineseTokenizer.from_vocab('models/zh_vocab.txt')
+    en_tk = EnglishTokenizer.from_vocab('models/en_vocab.txt')
+    
+    train['zh'] = train['zh'].apply(lambda x: zh_tk.encode(x, False))
+    train['en'] = train['en'].apply(lambda x: en_tk.encode(x, True))
+    train.to_json('data/processed/train.jsonl', orient='records', lines=True, force_ascii=False)
+    
+    test['zh'] = test['zh'].apply(lambda x: zh_tk.encode(x, False))
+    test['en'] = test['en'].apply(lambda x: en_tk.encode(x, True))
+    test.to_json('data/processed/test.jsonl', orient='records', lines=True, force_ascii=False)
+    
+    print("完成")
+
+class Dataset(Dataset):
+    def __init__(self, path, max_len=50):
+        self.data = [json.loads(l) for l in open(path, encoding='utf-8')]
+        self.max_len = max_len
+    
+    def __getitem__(self, i):
+        src = self.data[i]['en'][:self.max_len]
+        trg = self.data[i]['zh'][:self.max_len]
+        if len(src) < self.max_len:
+            src += [0] * (self.max_len - len(src))
+        if len(trg) < self.max_len:
+            trg += [0] * (self.max_len - len(trg))
+        return torch.tensor(src), torch.tensor(trg)
+    
+    def __len__(self):
+        return len(self.data)
+
+if __name__ == '__main__':
+    process()
+   
+
+
+def train_one_epoch(model,dataloader,loss_fn,optimizer,device):
+    total_loss=0
+    model.train()
+    for inputs, targets in tqdm(dataloader,desc='训练'):
+        encoder_inputs=inputs.to(device)
+        decoder_inputs=targets[:,:-1]
+        decoder_targets=targets[:,1:]
+        encoder_outputs,context_vector=model.encoder(encoder_inputs)
+        decoder_hidden=context_vector.unsqueeze(0)
+        decoder_outputs=[]
+        seq_len =decoder_inputs.shape[1]
+        for i in range(seq_len):
+            decoder_input=decoder_inputs[:,1].unsequeeze(1)
+            decoder_output,decoder_hidden=model.decoder(decoder_input,decoder_hidden,encoder_outputs)
+            decoder_outputs.append(decoder_output)
+        decoder_outputs=torch.cat(decoder_outputs,dim=1)
+        decoder_outputs=decoder_outputs.reshape(-1,decoder_outputs.shape[-1])
+        decoder_targets=decoder_targets.reshape(-1)
+        loss= loss_fn(decoder_outputs,decoder_targets)
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+        total_loss += loss.item()
+    return total_loss/ len(dataloader)
+
+def train():
+    device=torch.device('cuda' if torch.cuda.is_available()else 'cpu')
+    
